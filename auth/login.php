@@ -1,28 +1,41 @@
 <?php
+// login.php
 session_start();
 require_once __DIR__ . '/../config/config.php';
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/functions.php';
+
 function firstTimeAdminSetup() {
     global $pdo;
     
-    // Check if any admin exists
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM users WHERE user_type = 'admin'");
-    $stmt->execute();
+    if ($pdo === null) {
+        error_log("PDO connection is null in firstTimeAdminSetup()");
+        return;
+    }
     
-    if ($stmt->fetchColumn() == 0) {
-        // No admin exists, create default admin
-        $default_email = 'admin@hospital.com';
-        $default_password = password_hash('AdminPass123!', PASSWORD_DEFAULT);
+    try {
+        $stmt = $pdo->prepare("SELECT COUNT(*) FROM users WHERE user_type = 'admin'");
+        $stmt->execute();
         
-        $stmt = $pdo->prepare("INSERT INTO users (email, password, user_type, created_at) VALUES (?, ?, 'admin', NOW())");
-        $stmt->execute([$default_email, $default_password]);
+        if ($stmt->fetchColumn() == 0) {
+            $default_email = 'admin@hospital.com';
+            $default_password = password_hash('AdminPass123!', PASSWORD_DEFAULT, ['cost' => 12]);
+            
+            $stmt = $pdo->prepare("INSERT INTO users (email, password, user_type, created_at) VALUES (?, ?, 'admin', NOW())");
+            $stmt->execute([$default_email, $default_password]);
+        }
+    } catch (PDOException $e) {
+        error_log("Admin setup error: " . $e->getMessage());
     }
 }
 
-// Call this function early in the script
 firstTimeAdminSetup();
-// Check if already logged in
+
+// Generate CSRF token at the start of the script
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
 if (is_logged_in()) {
     $redirect_url = BASE_URL . ($_SESSION['user_type'] === 'admin' ? 'admin' : 'patient') . '/dashboard.php';
     header("Location: " . $redirect_url);
@@ -31,89 +44,67 @@ if (is_logged_in()) {
 
 $errors = [];
 $email = '';
-$login_type = isset($_GET['type']) && $_GET['type'] === 'admin' ? 'admin' : 'user';
+$login_type = isset($_GET['type']) && $_GET['type'] === 'admin' ? 'admin' : 'patient';
 
-// Handle login form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email = trim($_POST['email'] ?? '');
-    $password = $_POST['password'] ?? '';
-    $submitted_type = $_POST['login_type'] ?? 'user';
+    // Validate CSRF token with better error handling
+    if (!isset($_POST['csrf_token'])) {
+        $errors[] = "CSRF token is missing";
+    } elseif (!hash_equals($_SESSION['csrf_token'], $_POST['csrf_token'])) {
+        $errors[] = "Invalid request. Please refresh the page and try again.";
+        // Regenerate token after failed validation
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    } else {
+        $email = trim($_POST['email'] ?? '');
+        $password = $_POST['password'] ?? '';
+        $submitted_type = $_POST['login_type'] ?? 'patient';
 
-    // Validate input
-    if (empty($email)) {
-        $errors[] = "Email is required";
-    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $errors[] = "Invalid email format";
-    }
-
-    if (empty($password)) {
-        $errors[] = "Password is required";
-    }
-
-   // If no validation errors, attempt login
-if (empty($errors)) {
-    try {
-        // Debugging for admin login
-    if ($submitted_type === 'admin') {
-        // Log detailed login attempt information
-        error_log("Admin Login Attempt Details:");
-        error_log("Submitted Email: " . $email);
-        error_log("Submitted Password Length: " . strlen($password));
-
-        // Prepare and execute query
-        $stmt = $pdo->prepare("SELECT * FROM users WHERE email = ? AND user_type = 'admin'");
-        $stmt->execute([$email]);
-        $user = $stmt->fetch();
-
-        // Log user query results
-        if (!$user) {
-            error_log("No admin user found with email: " . $email);
-        } else {
-            // Detailed user information logging
-            error_log("Stored User ID: " . $user['id']);
-            error_log("Stored Email: " . $user['email']);
-            error_log("Stored User Type: " . $user['user_type']);
-            error_log("Stored Password Hash Length: " . strlen($user['password']));
-            
-            // Password verification debug
-            $password_match = password_verify($password, $user['password']);
-            error_log("Password Verification Result: " . ($password_match ? 'SUCCESS' : 'FAILURE'));
+        if (empty($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $errors[] = "Invalid email format";
         }
-    }
-        // Use different queries based on login type
-        if ($submitted_type === 'admin') {
-            $stmt = $pdo->prepare("SELECT * FROM users WHERE email = ? AND user_type = 'admin'");
-        } else {
-            $stmt = $pdo->prepare("SELECT * FROM users WHERE email = ? AND user_type = 'patient'");
+
+        if (empty($password)) {
+            $errors[] = "Password is required";
         }
-        
-        $stmt->execute([$email]);
-        $user = $stmt->fetch();
 
-        // DEBUG: Print user details
-        error_log("User details: " . print_r($user, true));
-        error_log("Submitted email: " . $email);
-        error_log("Submitted type: " . $submitted_type);
+        if (empty($errors)) {
+            try {
+                $stmt = $pdo->prepare("
+                    SELECT * FROM users 
+                    WHERE email = ? 
+                    AND user_type = ? 
+                    AND status = 'active'
+                    LIMIT 1
+                ");
+                
+                $stmt->execute([$email, $submitted_type]);
+                $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        if ($user && password_verify($password, $user['password'])) {
-            // Existing login success logic
-            // ...
-        } else {
-            $errors[] = "Invalid email or password";
-            
-            // Additional debug information
-            error_log("Password verification failed");
-            if (!$user) {
-                error_log("No user found with email: " . $email);
-            } else {
-                error_log("Stored password hash: " . $user['password']);
+                if ($user && password_verify($password, $user['password'])) {
+                    // Successful login
+                    session_regenerate_id(true);
+                    $_SESSION['user_id'] = $user['id'];
+                    $_SESSION['user_type'] = $user['user_type'];
+                    $_SESSION['user_email'] = $user['email'];
+                    $_SESSION['last_activity'] = time();
+                    
+                    // Clear sensitive data
+                    $password = null;
+                    
+                    $redirect_url = BASE_URL . ($user['user_type'] === 'admin' ? 'admin' : 'patient') . '/dashboard.php';
+                    header("Location: " . $redirect_url);
+                    exit();
+                } else {
+                    // Failed login attempt
+                    $errors[] = "Invalid email or password";
+                    sleep(1); // Prevent brute force attacks
+                }
+            } catch (PDOException $e) {
+                $errors[] = "An error occurred. Please try again later.";
+                error_log("Login error: " . $e->getMessage());
             }
         }
-    } catch (PDOException $e) {
-        $errors[] = "An error occurred. Please try again later.";
-        error_log("Login error: " . $e->getMessage());
     }
-}
 }
 ?>
 <!DOCTYPE html>
@@ -148,6 +139,9 @@ if (empty($errors)) {
             <?php endif; ?>
 
             <form method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF'] . ($login_type === 'admin' ? '?type=admin' : '')); ?>" class="auth-form">
+                <!-- CSRF token input INSIDE the form -->
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
+                
                 <input type="hidden" name="login_type" value="<?php echo htmlspecialchars($login_type); ?>">
                 
                 <div class="form-group">

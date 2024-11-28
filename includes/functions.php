@@ -37,11 +37,11 @@ function logout_user() {
     set_message('You have been logged out successfully.');
 }
 
+
 // Session Management Functions
 function is_logged_in() {
-    return isset($_SESSION['user_id']) && !empty($_SESSION['user_id']);
+    return isset($_SESSION['user_id']);
 }
-
 function check_session_timeout() {
     if (!isset($_SESSION['last_activity'])) {
         logout_user();
@@ -164,29 +164,13 @@ function redirect($path, $with_message = null, $type = 'success') {
     header("Location: " . BASE_URL . $path);
     exit();
 }
-function sanitize_input($input) {
-    // If input is not a string, return as is
-    if (!is_string($input)) {
-        return $input;
-    }
-    
-    // Remove leading and trailing whitespace
-    $input = trim($input);
-    
-    // Remove HTML and PHP tags
-    $input = strip_tags($input);
-    
-    // Convert special characters to HTML entities
-    $input = htmlspecialchars($input, ENT_QUOTES, 'UTF-8');
-    
-    return $input;
+function sanitize_input($data) {
+    return htmlspecialchars(trim($data));
 }
 
 function validate_id_number($id_number) {
-    // Add specific validation rules for ID number
-    // Example: Check length, format, etc.
-    // This is a basic example - adjust according to your specific requirements
-    return preg_match('/^[0-9]{10}$/', $id_number) === 1;
+    // Modify this validation according to your ID number format requirements
+    return preg_match('/^[0-9A-Z-]{1,20}$/', $id_number);
 }
 
 function user_exists($value, $table, $column) {
